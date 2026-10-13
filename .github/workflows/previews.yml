@@ -1,0 +1,338 @@
+name: Previews
+
+# Synthetic previews in the shape of the linear-app workflows, for testing how Linear reads preview links.
+# Nothing is built or deployed; every URL is a placeholder.
+#
+#   Client preview     comment + job-level environment, URL fixed per pull request   (client.yml)
+#   Web preview        comment + deployment through the API, URL fixed per pull request (web-preview.yml)
+#   Storybook preview  comment + job-level environment, URL fixed per pull request   (orbiter.yml)
+#   Commit preview     deployment through the API only, one URL per commit
+#
+# The branch name picks what a pull request reports:
+#   manual/...    nothing; the test drives comments and deployments through the API
+#   comments/...  comments only
+#   deploys/...   deployments only
+#   anything else comments and deployments
+#
+# The head commit message can add: [fail-client] [fail-web] [fail-commit] [sleep N]
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  deployments: write
+
+jobs:
+  config:
+    name: Read test configuration
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      mode: ${{ steps.config.outputs.mode }}
+      fail_client: ${{ steps.config.outputs.fail_client }}
+      fail_web: ${{ steps.config.outputs.fail_web }}
+      fail_commit: ${{ steps.config.outputs.fail_commit }}
+      sleep: ${{ steps.config.outputs.sleep }}
+    steps:
+      - id: config
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const { data: commit } = await github.rest.repos.getCommit({ ...context.repo, ref: pr.head.sha });
+            const message = commit.commit.message;
+            const branch = pr.head.ref;
+            const mode = branch.startsWith("manual/")
+              ? "manual"
+              : branch.startsWith("comments/")
+                ? "comments"
+                : branch.startsWith("deploys/")
+                  ? "deploys"
+                  : "both";
+            core.setOutput("mode", mode);
+            for (const name of ["client", "web", "commit"]) {
+              core.setOutput(`fail_${name}`, String(message.includes(`[fail-${name}]`)));
+            }
+            core.setOutput("sleep", (message.match(/\[sleep (\d+)\]/) ?? [])[1] ?? "20");
+
+  client_build:
+    name: Client build
+    needs: config
+    if: needs.config.outputs.mode != 'manual'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      preview_url: ${{ steps.build.outputs.preview_url }}
+    env:
+      MARKER: "<!-- preview-marker -->"
+      PREVIEW_URL: https://example.com/linear-test/client/pr-${{ github.event.number }}
+    steps:
+      - name: Post client preview building comment
+        if: needs.config.outputs.mode != 'deploys'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          BODY: |
+            <!-- preview-building -->
+            [Client preview](${{ env.PREVIEW_URL }}) building...
+        with:
+          script: &upsert_comment |
+            const marker = process.env.MARKER;
+            const body = `${marker}\n${process.env.BODY}`;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { ...context.repo, issue_number });
+            const existing = comments.find(c => c.user.login === "github-actions[bot]" && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ ...context.repo, issue_number, body });
+            }
+      - name: Build
+        id: build
+        env:
+          SLEEP: ${{ needs.config.outputs.sleep }}
+          FAIL: ${{ needs.config.outputs.fail_client }}
+        run: |
+          sleep "$SLEEP"
+          if [ "$FAIL" = "true" ]; then
+            echo "Simulated client build failure"
+            exit 1
+          fi
+          echo "preview_url=$PREVIEW_URL" >> "$GITHUB_OUTPUT"
+      - name: Update client preview comment
+        if: needs.config.outputs.mode != 'deploys'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          BODY: |
+            [Client preview](${{ env.PREVIEW_URL }})
+        with:
+          script: *upsert_comment
+
+  client_preview_deployment:
+    name: Client preview deployment
+    needs: [config, client_build]
+    if: needs.config.outputs.mode != 'comments' && needs.client_build.outputs.preview_url != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: Client preview
+      url: ${{ needs.client_build.outputs.preview_url }}
+    steps:
+      - name: Report preview URL
+        env:
+          PREVIEW_URL: ${{ needs.client_build.outputs.preview_url }}
+        run: echo "Client preview is at $PREVIEW_URL"
+
+  web_preview:
+    name: Web preview
+    needs: config
+    if: needs.config.outputs.mode != 'manual'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      MARKER: "<!-- web-preview-marker -->"
+      PREVIEW_URL: https://example.com/linear-test/web/pr-${{ github.event.number }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      MODE: ${{ needs.config.outputs.mode }}
+    steps:
+      - name: Update comment to building
+        if: needs.config.outputs.mode != 'deploys'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          BODY: |
+            <!-- preview-building -->
+            [Web preview](${{ env.PREVIEW_URL }}) — [building...](${{ env.RUN_URL }})
+        with:
+          script: *upsert_comment
+      - name: Report web preview deployment as building
+        if: needs.config.outputs.mode != 'comments'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          STATE: pending
+        with:
+          script: &web_deployment |
+            // A commit has one web preview deployment, and each status of the commit goes to it.
+            const sha = context.payload.pull_request.head.sha;
+            const state = process.env.STATE;
+            const environment = "Web preview";
+            const building = state === "pending";
+            const succeeded = state === "success";
+            const { data: deployments } = await github.rest.repos.listDeployments({ ...context.repo, sha, environment });
+            let deployment = deployments[0];
+            if (!deployment) {
+              ({ data: deployment } = await github.rest.repos.createDeployment({
+                ...context.repo,
+                ref: sha,
+                environment,
+                auto_merge: false,
+                required_contexts: [],
+              }));
+            }
+            await github.rest.repos.createDeploymentStatus({
+              ...context.repo,
+              deployment_id: deployment.id,
+              state: building ? "in_progress" : state,
+              environment_url: building || succeeded ? process.env.PREVIEW_URL : undefined,
+              log_url: succeeded ? undefined : process.env.RUN_URL,
+              // Every pull request deploys to this environment. Keep this preview from deactivating the others.
+              auto_inactive: false,
+            });
+      - name: Build
+        id: build
+        continue-on-error: true
+        env:
+          SLEEP: ${{ needs.config.outputs.sleep }}
+          FAIL: ${{ needs.config.outputs.fail_web }}
+        run: |
+          sleep "$SLEEP"
+          if [ "$FAIL" = "true" ]; then
+            echo "Simulated web build failure"
+            exit 1
+          fi
+      - name: Update comment to ready
+        if: needs.config.outputs.mode != 'deploys' && steps.build.outcome == 'success'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          BODY: |
+            [Web preview](${{ env.PREVIEW_URL }})
+        with:
+          script: *upsert_comment
+      - name: Update comment to failed
+        if: needs.config.outputs.mode != 'deploys' && steps.build.outcome == 'failure'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          BODY: |
+            [Web preview (failed)](${{ env.PREVIEW_URL }}) — [logs](${{ env.RUN_URL }})
+        with:
+          script: *upsert_comment
+      - name: Report web preview deployment result
+        if: needs.config.outputs.mode != 'comments'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          STATE: ${{ steps.build.outcome }}
+        with:
+          script: *web_deployment
+
+  storybook:
+    name: Storybook preview
+    needs: config
+    if: needs.config.outputs.mode == 'both' || needs.config.outputs.mode == 'deploys'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: Storybook preview
+      url: https://example.com/linear-test/storybook/${{ github.event.number }}
+    env:
+      MARKER: "<!-- orbiter-preview-marker -->"
+      PREVIEW_URL: https://example.com/linear-test/storybook/${{ github.event.number }}
+    steps:
+      - name: Post building preview comment
+        if: needs.config.outputs.mode == 'both'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          BODY: |
+            <!-- preview-building -->
+            [Storybook preview](${{ env.PREVIEW_URL }}) building...
+        with:
+          script: *upsert_comment
+      - name: Build
+        env:
+          SLEEP: ${{ needs.config.outputs.sleep }}
+        run: sleep "$SLEEP"
+      - name: Update preview comment
+        if: needs.config.outputs.mode == 'both'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          BODY: |
+            [Storybook preview](${{ env.PREVIEW_URL }})
+        with:
+          script: *upsert_comment
+
+  storybook_comment_only:
+    name: Storybook preview (comment only)
+    needs: config
+    if: needs.config.outputs.mode == 'comments'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      MARKER: "<!-- orbiter-preview-marker -->"
+      PREVIEW_URL: https://example.com/linear-test/storybook/${{ github.event.number }}
+    steps:
+      - name: Post building preview comment
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          BODY: |
+            <!-- preview-building -->
+            [Storybook preview](${{ env.PREVIEW_URL }}) building...
+        with:
+          script: *upsert_comment
+      - name: Build
+        env:
+          SLEEP: ${{ needs.config.outputs.sleep }}
+        run: sleep "$SLEEP"
+      - name: Update preview comment
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          BODY: |
+            [Storybook preview](${{ env.PREVIEW_URL }})
+        with:
+          script: *upsert_comment
+
+  commit_preview:
+    name: Commit preview
+    needs: config
+    if: needs.config.outputs.mode == 'both' || needs.config.outputs.mode == 'deploys'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PREVIEW_URL: https://example.com/linear-test/commit/${{ github.event.pull_request.head.sha }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Create deployment and report it as building
+        id: deployment
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const { data: deployment } = await github.rest.repos.createDeployment({
+              ...context.repo,
+              ref: context.payload.pull_request.head.sha,
+              environment: "Commit preview",
+              auto_merge: false,
+              required_contexts: [],
+            });
+            core.setOutput("id", String(deployment.id));
+            await github.rest.repos.createDeploymentStatus({
+              ...context.repo,
+              deployment_id: deployment.id,
+              state: "in_progress",
+              environment_url: process.env.PREVIEW_URL,
+              log_url: process.env.RUN_URL,
+            });
+      - name: Build
+        id: build
+        continue-on-error: true
+        env:
+          SLEEP: ${{ needs.config.outputs.sleep }}
+          FAIL: ${{ needs.config.outputs.fail_commit }}
+        run: |
+          sleep "$SLEEP"
+          if [ "$FAIL" = "true" ]; then
+            echo "Simulated commit preview failure"
+            exit 1
+          fi
+      - name: Report the result
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          DEPLOYMENT_ID: ${{ steps.deployment.outputs.id }}
+          STATE: ${{ steps.build.outcome }}
+        with:
+          script: |
+            const succeeded = process.env.STATE === "success";
+            await github.rest.repos.createDeploymentStatus({
+              ...context.repo,
+              deployment_id: Number(process.env.DEPLOYMENT_ID),
+              state: succeeded ? "success" : "failure",
+              environment_url: succeeded ? process.env.PREVIEW_URL : undefined,
+              log_url: process.env.RUN_URL,
+            });
