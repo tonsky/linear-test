@@ -1,0 +1,12 @@
+# Test for LIN-89097: a pull_request job that declares an environment, so GitHub creates the deployment itself.
+name: environment-deploy
+on:
+  pull_request:
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: merge-ref-test
+      url: https://example.net/merge-ref-test
+    steps:
+      - run: echo "ref=$GITHUB_REF sha=$GITHUB_SHA head=${{ github.event.pull_request.head.sha }}"
