@@ -1,69 +1,69 @@
 
-  private shouldNotify(subscriber: Subscriber, event: EventData): boolean {
-    if (!subscriber.filter) {
+  private shouldBroadcast(listener: Listener, message: Message): boolean {
+    if (!listener.filter) {
       return true;
     }
-    return JSON.stringify(event.payload).includes(subscriber.filter);
+    return JSON.stringify(message.payload).includes(listener.filter);
   }
-  getHistory(): EventData[] {
-    return [...this.eventHistory];
+  getLog(): Message[] {
+    return [...this.messageLog];
   }
-  getSubscriptions(): SubscriptionInfo[] {
-    const result: SubscriptionInfo[] = [];
-    for (const [eventType, subs] of this.subscribers) {
-      for (const subscriber of subs) {
+  getListenerInfo(): ListenerInfo[] {
+    const result: ListenerInfo[] = [];
+    for (const [messageType, registeredListeners] of this.listeners) {
+      for (const listener of registeredListeners) {
         result.push({
-          subscriberId: subscriber.id,
-          eventType,
+          listenerId: listener.id,
+          messageType,
           active: true,
         });
       }
     }
     return result;
   }
-  clearHistory(): void {
-    this.eventHistory = [];
+  clearLog(): void {
+    this.messageLog = [];
   }
-  clearSubscriptions(eventType?: string): void {
-    if (eventType) {
-      this.subscribers.delete(eventType);
+  clearListeners(messageType?: string): void {
+    if (messageType) {
+      this.listeners.delete(messageType);
     } else {
-      this.subscribers.clear();
+      this.listeners.clear();
     }
   }
-  getSubscriberCount(eventType: string): number {
-    return this.subscribers.get(eventType)?.length || 0;
+  getListenerCount(messageType: string): number {
+    return this.listeners.get(messageType)?.length || 0;
   }
-  hasSubscribers(eventType: string): boolean {
-    return this.getSubscriberCount(eventType) > 0;
+  hasListeners(messageType: string): boolean {
+    return this.getListenerCount(messageType) > 0;
   }
-  setDebugMode(enabled: boolean): void {
-    this.debugMode = enabled;
+  setVerboseMode(enabled: boolean): void {
+    this.verboseMode = enabled;
   }
-  setMaxHistorySize(size: number): void {
-    this.maxHistorySize = size;
-    while (this.eventHistory.length > this.maxHistorySize) {
-      this.eventHistory.shift();
+  setMaxLogSize(size: number): void {
+    this.maxLogSize = size;
+    while (this.messageLog.length > this.maxLogSize) {
+      this.messageLog.shift();
     }
   }
 }
-// Utility functions for event handling
-function createEventData(type: string, payload: unknown): EventData {
+// Utility functions for message handling
+function createMessage(type: string, payload: unknown): Message {
   return {
-    id: uuid(),
+    id: generateId(),
     type,
     payload,
     timestamp: new Date(),
   };
 }
-function isValidEventType(eventType: string): boolean {
-  return eventType.length > 0 && eventType.length <= 100;
+function isValidMessageType(messageType: string): boolean {
+  return messageType.length > 0 && messageType.length <= 100;
 }
-function formatEventData(event: EventData): string {
-  return `[${event.timestamp.toISOString()}] ${event.type}: ${JSON.stringify(event.payload)}`;
+function formatMessage(message: Message): string {
+  return `[${message.timestamp.toISOString()}] ${message.type}: ${JSON.stringify(message.payload)}`;
 }
 // Type guards
-function isEventData(obj: unknown): obj is EventData {
+function isMessage(obj: unknown): obj is Message {
   return (
     typeof obj === 'object' &&
     obj !== null &&
@@ -73,25 +73,25 @@ function isEventData(obj: unknown): obj is EventData {
     'timestamp' in obj
   );
 }
-function isSubscriber(obj: unknown): obj is Subscriber {
+function isListener(obj: unknown): obj is Listener {
   return (
     typeof obj === 'object' &&
     obj !== null &&
     'id' in obj &&
     'callback' in obj &&
-    typeof (obj as Subscriber).callback === 'function'
+    typeof (obj as Listener).callback === 'function'
   );
 }
 export {
-  EventBus,
-  EventData,
-  Subscriber,
-  EventHandler,
-  UnsubscribeFn,
-  SubscriptionInfo,
-  createEventData,
-  isValidEventType,
-  formatEventData,
-  isEventData,
-  isSubscriber,
+  MessageBroker,
+  Message,
+  Listener,
+  MessageHandler,
+  CleanupFn,
+  ListenerInfo,
+  createMessage,
+  isValidMessageType,
+  formatMessage,
+  isMessage,
+  isListener,
 };
