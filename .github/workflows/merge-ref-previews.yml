@@ -1,0 +1,110 @@
+name: Merge ref previews
+
+# Builds the default pull_request checkout, which is GitHub's speculative merge commit (refs/pull/N/merge), and reports
+# a deployment of that build in the ways real workflows do, for testing how Linear matches and shows them (LIN-88130).
+# Nothing is deployed; every URL is a placeholder that names the commit the job built.
+#
+#   bobheadxi        bobheadxi/deployments with its defaults: ref = github.ref (refs/pull/N/merge)
+#   chrnorm          chrnorm/deployment-action with its defaults: ref = the head branch, sha = github.sha (the merge commit)
+#   merge-sha        actions/github-script, createDeployment with ref = github.sha (the merge commit)
+#   native           a job-level environment, which GitHub turns into a deployment itself
+#
+# Runs only for pull request branches named manual/merge-ref-*, which previews.yml leaves alone.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  deployments: write
+
+jobs:
+  bobheadxi:
+    name: bobheadxi/deployments (ref = github.ref)
+    if: startsWith(github.head_ref, 'manual/merge-ref-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build
+        run: |
+          echo "GITHUB_REF=$GITHUB_REF GITHUB_SHA=$GITHUB_SHA"
+          echo "pull request head=${{ github.event.pull_request.head.sha }} base=${{ github.event.pull_request.base.sha }}"
+          echo "checked out: $(git log -1 --format='%H parents=%P')"
+      - uses: bobheadxi/deployments@648679e8e4915b27893bd7dbc35cb504dc915bc8 # v1.5.0
+        id: deployment
+        with:
+          step: start
+          env: merge-ref bobheadxi
+          debug: true
+      - uses: bobheadxi/deployments@648679e8e4915b27893bd7dbc35cb504dc915bc8 # v1.5.0
+        with:
+          step: finish
+          status: ${{ job.status }}
+          env: ${{ steps.deployment.outputs.env }}
+          deployment_id: ${{ steps.deployment.outputs.deployment_id }}
+          env_url: https://example.com/linear-test/bobheadxi/built-${{ github.sha }}
+          debug: true
+
+  chrnorm:
+    name: chrnorm/deployment-action (ref = head branch, sha = github.sha)
+    if: startsWith(github.head_ref, 'manual/merge-ref-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build
+        run: |
+          echo "GITHUB_REF=$GITHUB_REF GITHUB_HEAD_REF=$GITHUB_HEAD_REF GITHUB_SHA=$GITHUB_SHA"
+          echo "checked out: $(git log -1 --format='%H parents=%P')"
+      - uses: chrnorm/deployment-action@500aa6a23c81ffa1acf71072aee3cfa2cc2e556a # v2.0.8
+        id: deployment
+        with:
+          token: ${{ github.token }}
+          environment: merge-ref chrnorm
+      - uses: chrnorm/deployment-status@6df8d036fd2fee9eb82936733953da1f8382b41e # v2.0.4
+        with:
+          token: ${{ github.token }}
+          deployment-id: ${{ steps.deployment.outputs.deployment_id }}
+          state: success
+          environment-url: https://example.com/linear-test/chrnorm/built-${{ github.sha }}
+
+  merge-sha:
+    name: github-script (ref = github.sha)
+    if: startsWith(github.head_ref, 'manual/merge-ref-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build
+        run: echo "checked out: $(git log -1 --format='%H parents=%P')"
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const { data: deployment } = await github.rest.repos.createDeployment({
+              ...context.repo,
+              ref: context.sha,
+              environment: "merge-ref sha",
+              auto_merge: false,
+              required_contexts: [],
+            });
+            await github.rest.repos.createDeploymentStatus({
+              ...context.repo,
+              deployment_id: deployment.id,
+              state: "success",
+              environment_url: `https://example.com/linear-test/merge-sha/built-${context.sha}`,
+            });
+            core.notice(`Deployment ${deployment.id}: ref=${deployment.ref} sha=${deployment.sha}`);
+
+  native:
+    name: Job-level environment
+    if: startsWith(github.head_ref, 'manual/merge-ref-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: merge-ref native
+      url: https://example.com/linear-test/native/built-${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build
+        run: echo "GITHUB_REF=$GITHUB_REF GITHUB_SHA=$GITHUB_SHA checked out $(git rev-parse HEAD)"
